@@ -4,7 +4,7 @@ import App from './App';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
-  throw new Error("No se pudo encontrar el elemento root");
+  throw new Error("No se pudo encontrar el elemento root!");
 }
 
 const root = ReactDOM.createRoot(rootElement);
