@@ -41,32 +41,54 @@ export async function requestsHandler(req: HttpRequest, context: InvocationConte
         
         if (method === "post") {
             const r: any = await req.json();
-            let triage = { priority: 'medium', summary: r.subject, category: 'General' };
             
-            if (API_KEY && API_KEY !== "undefined") {
+            // Valores por defecto (Failsafe) en caso de que la IA falle o no esté disponible
+            let triage = { 
+                priority: 'medium', 
+                summary: r.subject, 
+                category: 'General' 
+            };
+            
+            let aiSuccessful = false;
+
+            if (API_KEY && API_KEY !== "undefined" && API_KEY !== "") {
                 try {
                     const ai = new GoogleGenAI({ apiKey: API_KEY });
                     const response = await ai.models.generateContent({
                         model: "gemini-3-flash-preview",
-                        contents: `Analiza ticket IT: ${r.subject}. ${r.description || ''}`,
+                        contents: `Analiza este ticket de soporte técnico y clasifícalo.
+                        Asunto: ${r.subject}
+                        Descripción: ${r.description || 'No provista'}`,
                         config: {
                             responseMimeType: "application/json",
                             responseSchema: {
                                 type: Type.OBJECT,
                                 properties: {
                                     priority: { type: Type.STRING, enum: ['low', 'medium', 'high'] },
-                                    summary: { type: Type.STRING },
-                                    category: { type: Type.STRING }
+                                    summary: { type: Type.STRING, description: "Un resumen muy breve de menos de 10 palabras" },
+                                    category: { type: Type.STRING, enum: ['Software', 'Hardware', 'Redes', 'Accesos', 'General'] }
                                 },
                                 required: ['priority', 'summary', 'category']
                             }
                         }
                     });
-                    triage = JSON.parse(response.text);
-                } catch (aiErr) {
-                    context.warn("Fallo triaje IA, continuando con datos básicos.");
+
+                    if (response && response.text) {
+                        const parsedTriage = JSON.parse(response.text.trim());
+                        triage = parsedTriage;
+                        aiSuccessful = true;
+                        context.log("Triaje por IA completado con éxito.");
+                    }
+                } catch (aiErr: any) {
+                    context.warn("Fallo el servicio de IA (Gemini):", aiErr.message);
+                    // No hacemos nada, triage ya tiene los valores por defecto
                 }
+            } else {
+                context.warn("API_KEY no configurada. Usando triaje manual por defecto.");
             }
+
+            // Si la IA falló, añadimos una nota al resumen para el agente
+            const finalSummary = aiSuccessful ? triage.summary : `[Revisión Manual] ${triage.summary}`;
 
             await poolConnection.request()
                 .input('id', sql.VarChar, r.id || `T-${Math.floor(1000 + Math.random()*8999)}`)
@@ -77,12 +99,12 @@ export async function requestsHandler(req: HttpRequest, context: InvocationConte
                 .input('status', sql.VarChar, 'waiting')
                 .input('createdAt', sql.BigInt, Date.now())
                 .input('priority', sql.VarChar, triage.priority)
-                .input('aiSummary', sql.Text, triage.summary)
+                .input('aiSummary', sql.Text, finalSummary)
                 .input('category', sql.VarChar, triage.category)
                 .query(`INSERT INTO requests (id, userId, userName, subject, description, status, createdAt, priority, aiSummary, category) 
                         VALUES (@id, @userId, @userName, @subject, @description, @status, @createdAt, @priority, @aiSummary, @category)`);
             
-            return { status: 201, jsonBody: { success: true } };
+            return { status: 201, jsonBody: { success: true, aiProcessed: aiSuccessful } };
         }
 
         if (method === "patch") {
@@ -100,13 +122,12 @@ export async function requestsHandler(req: HttpRequest, context: InvocationConte
 
         return { status: 405, body: "Método no permitido" };
     } catch (err: any) {
-        context.error(`Error en ejecución: ${err.message}`);
+        context.error(`Error en ejecución del handler: ${err.message}`);
         return { 
             status: 500, 
             jsonBody: { 
                 error: "Error interno del servidor", 
-                detail: err.message,
-                hint: "Verifica que la base de datos acepte conexiones y que el ConnectionString sea correcto." 
+                detail: err.message
             } 
         };
     }
